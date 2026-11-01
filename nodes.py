@@ -14,6 +14,7 @@ import comfy.utils
 from .core import boundary_video, euler_step, low_size, validate_schedule, validate_video, video_endpoint
 from .correction import correct, pixel_anchor, resize_keyframes
 from .state import SplitState
+from .temporal import sample_low_windows, validate_high_windows, window_config
 
 
 def streams(samples):
@@ -109,11 +110,18 @@ class SelfLiftSplitLowH3:
             count += 1
             if count == transition_step:
                 captured['x'], captured['x0'] = x, x0
-        low_output = comfy.samplers.sample(low_model, noise, pos_low, neg_low, cfg, low_model.load_device,
-                              sampler, low_sigmas, low_model.model_options, latent_image=low_latent,
-                              callback=callback, disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed)
-        if count != transition_step or 'x0' not in captured:
-            raise RuntimeError(f'expected {transition_step} Euler callbacks, received {count}')
+        # Keep the attached config even when sampling falls back to a single window.
+        _, temporal_config = window_config(low_model)
+        windowed = sample_low_windows(low_model, noise, pos_low, neg_low, low_latent,
+                                      sampler, low_sigmas, seed, cfg, transition_step, masked=mask is not None)
+        if windowed is None:
+            low_output = comfy.samplers.sample(low_model, noise, pos_low, neg_low, cfg, low_model.load_device,
+                                  sampler, low_sigmas, low_model.model_options, latent_image=low_latent,
+                                  callback=callback, disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed)
+            if count != transition_step or 'x0' not in captured:
+                raise RuntimeError(f'expected {transition_step} Euler callbacks, received {count}')
+        else:
+            captured, low_output, temporal_config = windowed
         x0_video = streams(captured['x0'])[0]
         clean = latent_format.process_out(x0_video.float())
         endpoint = latent_image.copy()
@@ -123,7 +131,7 @@ class SelfLiftSplitLowH3:
         endpoint['samples'] = clean.to(comfy.model_management.intermediate_device())
         state = SplitState(sigmas, transition_step, seed, x0_video, captured['x'], captured['x0'],
                            low_output, True, (height, width), video, mask, latent_image.get('batch_index'),
-                           sampling, latent_format)
+                           sampling, latent_format, temporal_config)
         return (state, endpoint, pos_low, neg_low, int(target_pixels[1]), int(target_pixels[0]))
 
 
@@ -146,6 +154,7 @@ class SelfLiftSplitTransitionH3:
     def transition(self, state, upscaled_video, model_high, mode, rho, w_min, w_max, vae=None):
         if not isinstance(state, SplitState):
             raise ValueError('state must originate from SelfLift Split Low H3')
+        validate_high_windows(model_high, state.temporal_config)
         _, tail = validate_schedule(state.sigmas, state.transition_step)
         if not 0 <= rho <= 1 or not 0 <= w_min <= w_max <= 1:
             raise ValueError('correction requires 0<=rho<=1 and 0<=w_min<=w_max<=1')

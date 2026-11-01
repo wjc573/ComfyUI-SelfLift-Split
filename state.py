@@ -18,3 +18,4 @@ class SplitState:
     batch_index: object
     model_sampling: object
     latent_format: object
+    temporal_config: object = None

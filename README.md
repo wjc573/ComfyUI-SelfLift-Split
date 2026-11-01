@@ -79,6 +79,20 @@ DisableNoise                            -> SamplerCustomAdvanced.noise
 
 Do not connect `RandomNoise` to the second sampler after the transition node. That would inject random noise a second time and can corrupt the video/audio continuation.
 
+## Temporal Window compatibility
+
+The existing node IDs and sockets are unchanged. With no TemporalWindow patch, or a single temporal window with spatial tiles disabled, Low retains the original sampling path.
+
+For multiwindow H3 sampling, install `ComfyUI-MiniMaxH3-TemporalWindow-SpatialTiles` and route both MODEL and CLIP through its Temporal Window node. Connect its MODEL to both Split Low and Transition's `model_high`. Use the original high-resolution conditioning for the native high sampler, and keep `DisableNoise` on that sampler.
+
+Low reads the attached window/overlap/carry settings automatically. It executes a real Euler prefix inside each window and captures every window's boundary; it does not treat the upstream per-window progress notification as an Euler callback. Previous **clean predictions** guide the next low window, while the noisy boundary and audio state are separately retained for Transition. The high sampler uses the upstream window patch normally.
+
+Low records the attached window configuration even when it plans only one window. Transition verifies that the high model has the same configuration, including the no-wrapper case; connecting Temporal Window to only one stage is rejected.
+
+Execution order is **all low windows → external lift → all high windows**. This is not a controller that finishes both resolutions of window 1 before starting window 2. Consequently, a previous high-resolution window does not guide the next low-resolution window. Output is not promised to match a whole-window progressive sampler numerically.
+
+Multiwindow mode currently supports batch 1, no latent noise mask, and `spatial_tiles=false`. Existing nonwindowed mask handling remains available. The external learned upscaler, initial reference encoding and final decoding may still process full-length data; windowing does not guarantee constant whole-workflow memory. There is no new public node or pip dependency; the upstream window package is optional for nonwindowed workflows.
+
 ## Included Workflows
 
 The `workflows/` directory contains the two tested examples used for the final H3 comparison:
@@ -112,13 +126,13 @@ This package imports ComfyUI's native Python modules and is intended to run insi
 
 The repository includes unit tests for the mathematical boundary helpers, correction helpers, node contracts, nested AV packing, audio handoff, masks, and all boundary modes.
 
-Run them with the Python environment used by ComfyUI:
+Run from the ComfyUI root using its Python environment (so `comfy` is importable):
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v
+python -m unittest discover -s custom_nodes/ComfyUI-SelfLift-Split/tests -p "test_*.py" -v
 ```
 
-The final local verification covered 16 tests.
+The local suite currently passes 23 tests, including multiwindow boundary/carry, callback validation and window-configuration guards. Temporal integration tests use a sibling TemporalWindow checkout; set `SELFLIFT_TW_PATH` to its `h3_windows.py` if installed elsewhere. Those optional tests are skipped if the source is absent. Tiny native H3 CPU checks additionally confirmed bit-identical no-window/single-window outputs against the previous implementation and finite multiwindow outputs for all four boundary modes. Production-model checks include a 56-frame smoke run and a 112-frame, 288×512, 24 fps two-person character-replacement run. Both used two windows in each stage. Source-aligned samples of the latter followed the main interaction sequence, and consecutive frames around the overlap showed no obvious person loss, identity swap or hard seam; fine hand placement still differed. These short-clip checks do not establish full-length quality or speed gains.
 
 ## Limitations
 
