@@ -83,13 +83,13 @@ Transition 之后不要再把 `RandomNoise` 接到二采。否则会在已经准
 
 原有节点 ID、输入输出接口不变。不连接 TemporalWindow，或在关闭空间分块时只有单个窗口，Low 仍走原采样路径。
 
-多窗时安装 `ComfyUI-MiniMaxH3-TemporalWindow-SpatialTiles`，模型与 CLIP 均经其 Temporal Window 节点；输出模型同时接 Split Low 和 Transition 的 `model_high`。原生高清采样器使用原始高清 conditioning，噪声输入仍接 `DisableNoise`。
+多窗时安装 `ComfyUI-MiniMaxH3-TemporalWindow-SpatialTiles`，模型与 CLIP 均经其 Temporal Window 节点；将同一个分窗节点的输出模型同时接 Split Low 和 Transition 的 `model_high`，窗口长度、重叠、短尾窗和 carry 参数只在分窗节点设置一次，SelfLift 自动读取，无需重复设置窗口长度。原生高清采样器使用原始高清 conditioning，噪声输入仍接 `DisableNoise`。
 
-Low 自动读取模型上的窗口、重叠、carry 参数，在每窗内部执行真实 Euler 前段并捕获切换状态，不把上游“每窗进度回调”冒充逐步采样回调。上一低清窗的**干净预测**引导下一低清窗；带噪边界和音频状态另行保留给 Transition。高清二采继续使用上游时间窗逻辑。两阶段窗口、重叠和 carry 参数必须相同。即使 Low 只规划出单窗，也保存其实际窗口配置；Transition 同时检查无窗口的情况，只给一个阶段接 TemporalWindow 或两侧参数不一致会明确报错。
+Low 自动读取模型上的窗口、重叠、carry 参数，在每窗内部执行真实 Euler 前段并捕获切换状态，不把上游“每窗进度回调”冒充逐步采样回调。上一低清窗的**干净预测**引导下一低清窗；带噪边界和音频状态另行保留给 Transition。高清二采继续使用上游时间窗逻辑。两阶段窗口、重叠、carry 开关、`min_final_frames`（短尾窗最小长度）和 `carry_frames`（引导长度）必须相同。Low 使用上游相同的尾窗计划，支持自然缩短的尾窗及不足最小长度时的回拉，避免合并阶段按完整窗口误判尺寸。即使 Low 只规划出单窗，也保存其实际窗口配置；Transition 同时检查无窗口的情况，只给一个阶段接 TemporalWindow 或两侧参数不一致会明确报错。
 
 执行顺序是：**低清各窗口 → 外置放大 → 高清各窗口**，不是第一窗低清＋高清完成后才开始第二窗。因此上一高清窗不会反馈到下一低清窗，不保证与整窗渐进采样数值一致。
 
-多窗暂限 batch=1、无 latent noise mask、`spatial_tiles=false`。旧的非分窗 mask 路径保持不变。外置 learned upscaler、初始参考编码和最后解码仍可能处理整段，不能承诺全流程恒定内存。无新增公开节点、无新增 pip 依赖；不分窗时不要求安装 TemporalWindow。
+多窗暂限 batch=1、无 latent noise mask、`spatial_tiles=false`；按尺寸和按数量配置的空间分块均会提前拒绝。旧的非分窗 mask 路径保持不变。外置 learned upscaler、初始参考编码和最后解码仍可能处理整段，不能承诺全流程恒定内存。无新增公开节点、无新增 pip 依赖；不分窗时不要求安装 TemporalWindow。
 
 ## 包含的工作流
 
@@ -130,7 +130,7 @@ ComfyUI/custom_nodes/ComfyUI-SelfLift-Split
 python -m unittest discover -s custom_nodes/ComfyUI-SelfLift-Split/tests -p "test_*.py" -v
 ```
 
-本地现通过 23 项测试，包含多窗边界与干净引导、回调检查和窗口配置防护。时间窗集成测试默认寻找同级 TemporalWindow 仓库；安装在其他目录可用 `SELFLIFT_TW_PATH` 指向其 `h3_windows.py`，未安装时跳过可选时间窗测试。另外使用小型原生 H3 CPU 模型确认：无窗口/单窗与修改前输出逐值一致，四种边界模式的多窗输出尺寸正确且数值有限。真实模型另完成 56 帧烟测，以及 288×512、24fps、112 帧的双人角色替换测试，两阶段均执行两个窗口。后者的同时间对照抽帧基本跟随主要互动动作，重叠区连续帧未见明显丢人、角色换位或硬接缝，精细手型仍有偏差。这些短片检查不代表完整长片画质或提速验收。
+本地现通过 26 项测试，包含多窗边界与干净引导、短尾窗、回调检查、尾窗及 carry 长度的一致性检查和空间分块防护。对 TemporalWindow 1.4.0 另通过 660 组尾窗/音频长度合并对照，以及 24 个小型原生 H3 CPU 双阶段采样组合（六种窗口配置 × 四种边界模式）；这些检查验证布局与有限数值，不代表真实模型画质验收。时间窗集成测试默认寻找同级 TemporalWindow 仓库；安装在其他目录可用 `SELFLIFT_TW_PATH` 指向其 `h3_windows.py`，未安装时跳过可选时间窗测试。另外使用小型原生 H3 CPU 模型确认：无窗口/单窗与修改前输出逐值一致，四种边界模式的多窗输出尺寸正确且数值有限。真实模型另完成 56 帧烟测，以及 288×512、24fps、112 帧的双人角色替换测试，两阶段均执行两个窗口。后者的同时间对照抽帧基本跟随主要互动动作，重叠区连续帧未见明显丢人、角色换位或硬接缝，精细手型仍有偏差。这些短片检查不代表完整长片画质或提速验收。
 
 ## 限制
 

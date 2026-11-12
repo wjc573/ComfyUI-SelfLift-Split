@@ -28,9 +28,10 @@ def window_config(model):
     if len(wrappers) != 1:
         raise ValueError('SelfLift Split expects exactly one TemporalWindow wrapper')
     w = wrappers[0]
-    if w.tile_h or w.tile_w:
+    if w.tile_h or w.tile_w or getattr(w, 'tile_counts', None) is not None:
         raise ValueError('SelfLift Split temporal mode requires spatial_tiles=false')
-    config = (w.window_frames, w.overlap_frames, w.carry_overlap)
+    config = (w.window_frames, w.overlap_frames, w.carry_overlap,
+              getattr(w, 'min_final_frames', 0), getattr(w, 'carry_frames', 0))
     return w, config
 
 
@@ -88,7 +89,12 @@ def sample_low_windows(model, noise, positive, negative, latent, sampler, sigmas
     if hw is None or not all(hasattr(hw, name) for name in required):
         raise RuntimeError('Unsupported TemporalWindow implementation; required window helpers missing')
     parts = _parts(latent)
-    windows = hw.plan_windows(parts[0].shape[2], wrapper.window_frames, wrapper.overlap_frames)
+    window_args = (parts[0].shape[2], wrapper.window_frames, wrapper.overlap_frames)
+    # Match the executor's tail policy; older wrappers only accept three arguments.
+    if hasattr(wrapper, 'min_final_frames'):
+        windows = hw.plan_windows(*window_args, min_final_frames=wrapper.min_final_frames)
+    else:
+        windows = hw.plan_windows(*window_args)
     if len(windows) == 1:
         return None
     if masked or parts[0].shape[0] != 1:
@@ -152,4 +158,4 @@ def sample_low_windows(model, noise, positive, negative, latent, sampler, sigmas
 
 def validate_high_windows(model, expected):
     if window_config(model)[1] != expected:
-        raise ValueError('SelfLift Split low/high TemporalWindow settings must match (window, overlap, carry)')
+        raise ValueError('SelfLift Split low/high TemporalWindow settings must match (window, overlap, carry, min_final_frames, carry_frames)')

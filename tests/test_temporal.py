@@ -83,11 +83,57 @@ class TemporalTests(unittest.TestCase):
         self.assertEqual(len(model.get_all_wrappers('outer_sample')), 1)
         self.assertIsNotNone(state.temporal_config)
 
+    def test_short_final_window_preserves_video_and_audio_boundaries(self):
+        wrapper = hw.WindowsWrapper(56, 22, True, 0, 0, 0, False, min_final_frames=22)
+        model = WindowModel(wrapper)
+        frames = 73
+        t, audio_t = hw.tokens_for_frames(frames), hw.audio_ticks(frames)
+        latent = {'samples': NestedTensor((torch.zeros(1, 24, t, 4, 6),
+                                          torch.zeros(1, 32, 2, audio_t)))}
+        plan = hw.plan_windows(t, 56, 22, 22)
+        self.assertLess(plan[-1][1], plan[0][1])
+        calls = []
+
+        def sample(*args, **kw):
+            parts = list(kw['latent_image'].unbind())
+            x = NestedTensor(tuple(torch.full_like(p, .9) for p in parts))
+            x0 = NestedTensor(tuple(torch.full_like(p, .4) for p in parts))
+            for i in range(3):
+                kw['callback'](i, x0, x, 3)
+            calls.append(tuple(p.shape for p in parts))
+            return NestedTensor(tuple(torch.full_like(p, .7) for p in parts))
+
+        with patch.object(nodes.comfy.samplers, 'sample', side_effect=sample):
+            state, clean, *_ = nodes.SelfLiftSplitLowH3().sample(
+                model, [], [], latent, nodes.comfy.samplers.ksampler('euler'),
+                torch.tensor([1., .8, .6, .4, .2, 0.]), 42, 1., 3, .5)
+        self.assertEqual([shapes[0][2] for shapes in calls], [tn for _, tn in plan])
+        for name, expected in [('low_x', .9), ('low_x0', .4), ('low_output', .7)]:
+            video, audio = getattr(state, name).unbind()
+            self.assertEqual(video.shape[2], t)
+            self.assertEqual(audio.shape[-1], audio_t)
+            torch.testing.assert_close(video, torch.full_like(video, expected))
+            torch.testing.assert_close(audio, torch.full_like(audio, expected))
+        torch.testing.assert_close(clean['samples'], torch.full_like(clean['samples'], .4))
+
 
 class ValidationTests(unittest.TestCase):
+    def test_transition_rejects_different_tail_or_carry_length(self):
+        from selflift_split_test.temporal import validate_high_windows, window_config
+        low = WindowModel(hw.WindowsWrapper(56, 39, True, 0, 0, 0, False,
+                                          min_final_frames=22, carry_frames=22))
+        expected = window_config(low)[1]
+        for tail, carry in [(0, 22), (39, 22), (22, 0), (22, 5)]:
+            with self.subTest(min_final_frames=tail, carry_frames=carry):
+                high = WindowModel(hw.WindowsWrapper(56, 39, True, 0, 0, 0, False,
+                                                     min_final_frames=tail, carry_frames=carry))
+                with self.assertRaisesRegex(ValueError, 'settings must match'):
+                    validate_high_windows(high, expected)
+        validate_high_windows(low.clone(), expected)
+
     def test_transition_rejects_missing_or_different_high_window(self):
         from selflift_split_test.temporal import validate_high_windows
-        expected = (39, 22, True)
+        expected = (39, 22, True, 0, 0)
         for other in [None, hw.WindowsWrapper(56, 22, True, 0, 0, 0, False)]:
             with self.assertRaisesRegex(ValueError, 'settings must match'):
                 validate_high_windows(WindowModel(other), expected)
@@ -114,7 +160,7 @@ class ValidationTests(unittest.TestCase):
                 lifted = nodes.SelfLiftSplitResizeH3().resize(state, clean, 'nearest-exact')[0]
                 with self.assertRaisesRegex(ValueError, 'settings must match'):
                     nodes.SelfLiftSplitTransitionH3().transition(state, lifted, high, 'upstream', 0, .5, 1)
-                expected = None if wrapper is None else (90, 22, True)
+                expected = None if wrapper is None else (90, 22, True, 0, 0)
                 self.assertEqual(state.temporal_config, expected)
                 # Unchanged fallback sampling remains usable with the same high configuration.
                 nodes.SelfLiftSplitTransitionH3().transition(state, lifted, low, 'upstream', 0, .5, 1)
@@ -158,6 +204,12 @@ class ValidationTests(unittest.TestCase):
         with patch.object(nodes.comfy.samplers, 'sample', side_effect=no_callbacks):
             with self.assertRaisesRegex(RuntimeError, 'expected 3 Euler callbacks per window, received 0'):
                 nodes.SelfLiftSplitLowH3().sample(model, [], [], {'samples': latent}, nodes.comfy.samplers.ksampler('euler'), torch.tensor([1., .8, .6, .4, .2, 0.]), 42, 1., 3, .5)
+
+    def test_count_based_spatial_tiles_rejected_explicitly(self):
+        from selflift_split_test.temporal import window_config
+        wrapper = hw.WindowsWrapper(56, 22, True, 0, 0, 0, False, tile_counts=(2, 2))
+        with self.assertRaisesRegex(ValueError, 'spatial_tiles=false'):
+            window_config(WindowModel(wrapper))
 
     def test_spatial_tiles_rejected_explicitly(self):
         from selflift_split_test.temporal import window_config
